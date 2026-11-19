@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3 Kanal Çoklu Şarkı Dinleyici</title>
+  <style>
+    :root {
+      --bg: #121417;
+      --panel: #1c2026;
+      --border: #2c323b;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #10b981;
+      --mute: #ef4444;
+      --solo: #f59e0b;
+    }
+    * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
+    body { background: var(--bg); color: var(--text); margin: 0; padding: 24px; display: flex; justify-content: center; }
+    .mixer { width: 100%; max-width: 720px; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 24px; }
+    h2 { margin: 0 0 16px; font-size: 1.25rem; }
+    .transport { display: flex; align-items: center; gap: 12px; background: #14171c; padding: 14px; border-radius: 10px; border: 1px solid var(--border); margin-bottom: 18px; flex-wrap: wrap; }
+    button { background: #262c36; color: var(--text); border: 1px solid var(--border); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-weight: 600; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-play { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .progress { flex: 1; min-width: 180px; display: flex; align-items: center; gap: 10px; }
+    input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+    .time { font-variant-numeric: tabular-nums; font-size: 0.85rem; color: var(--muted); min-width: 85px; text-align: right; }
+    .tracks { display: flex; flex-direction: column; gap: 10px; }
+    .track { display: grid; grid-template-columns: 165px auto 1fr auto; align-items: center; gap: 14px; background: #161a20; border: 1px solid var(--border); padding: 12px 16px; border-radius: 10px; }
+    .track-name { font-weight: 600; font-size: 0.95rem; }
+    .track-status { font-size: 0.75rem; color: var(--muted); }
+    .ms { display: flex; gap: 6px; }
+    .btn-m, .btn-s { width: 36px; height: 36px; padding: 0; }
+    .btn-m.active { background: var(--mute); border-color: var(--mute); color: #fff; }
+    .btn-s.active { background: var(--solo); border-color: var(--solo); color: #111; }
+    .vol { display: flex; align-items: center; gap: 8px; }
+    .file-btn { font-size: 0.78rem; background: #21262d; border: 1px solid var(--border); padding: 6px 10px; border-radius: 6px; cursor: pointer; color: var(--muted); }
+    @media (max-width: 600px) { .track { grid-template-columns: 1fr auto; } .vol { grid-column: 1 / -1; } }
+  </style>
+</head>
+<body>
+<div class="mixer">
+  <h2>3 Kanal Şarkı Dinleyici</h2>
+  <div class="transport">
+    <button id="playBtn" class="btn-play" disabled>Yükleniyor...</button>
+    <button id="stopBtn" disabled>Durdur</button>
+    <div class="progress">
+      <input type="range" id="seekBar" min="0" max="100" value="0" step="0.1" disabled />
+      <span class="time" id="timeDisplay">0:00 / 0:00</span>
+    </div>
+  </div>
+  <div class="tracks" id="tracks"></div>
+</div>
+<script>
+  const tracksConfig = [
+    { name: "1. küçük kara balık bas-ritim yok", url: "vokal.mp3" },
+    { name: "2. küçük kara balık sadece bas", url: "gitar.mp3" },
+    { name: "3. küçük kara balık sadece ritim", url: "bas.mp3" },
+  ];
+
+  let audioCtx = null, isPlaying = false, startTime = 0, pauseOffset = 0, duration = 0, raf = null;
+  const tracks = tracksConfig.map((c, i) => ({ id: i, name: c.name, url: c.url, buffer: null, source: null, gain: null, vol: 1, muted: false, solo: false }));
+
+  const tracksEl = document.getElementById("tracks");
+  const playBtn = document.getElementById("playBtn");
+  const stopBtn = document.getElementById("stopBtn");
+  const seekBar = document.getElementById("seekBar");
+  const timeDisplay = document.getElementById("timeDisplay");
+
+  tracks.forEach((t, i) => {
+    const row = document.createElement("div");
+    row.className = "track";
+    row.innerHTML = `
+      <div><div class="track-name" id="name-${i}">${t.name}</div><div class="track-status" id="st-${i}">Bekleniyor...</div></div>
+      <div class="ms"><button class="btn-m" id="m-${i}">M</button><button class="btn-s" id="s-${i}">S</button></div>
+      <div class="vol"><span style="font-size:0.8rem;color:#8b949e">Ses</span><input type="range" id="v-${i}" min="0" max="1" step="0.01" value="1" /></div>
+      <label class="file-btn">Dosya Seç<input type="file" id="f-${i}" accept="audio/*" hidden /></label>
+    `;
+    tracksEl.appendChild(row);
+    document.getElementById(`m-${i}`).onclick = () => { t.muted = !t.muted; document.getElementById(`m-${i}`).classList.toggle("active", t.muted); updateGains(); };
+    document.getElementById(`s-${i}`).onclick = () => { t.solo = !t.solo; document.getElementById(`s-${i}`).classList.toggle("active", t.solo); updateGains(); };
+    document.getElementById(`v-${i}`).oninput = (e) => { t.vol = +e.target.value; updateGains(); };
+    document.getElementById(`f-${i}`).onchange = async (e) => {
+      if (!e.target.files[0]) return;
+      initCtx();
+      const wasPlaying = isPlaying;
+      if (wasPlaying) pause();
+      const buf = await audioCtx.decodeAudioData(await e.target.files[0].arrayBuffer());
+      t.buffer = buf;
+      document.getElementById(`name-${i}`).textContent = e.target.files[0].name.replace(/\.[^/.]+$/, "");
+      document.getElementById(`st-${i}`).textContent = "Hazır (" + fmt(buf.duration) + ")";
+      updateDur();
+      if (wasPlaying) play();
+    };
+  });
+
+  function initCtx() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  }
+
+  async function loadAll() {
+    initCtx();
+    await Promise.all(tracks.map(async (t, i) => {
+      try {
+        const res = await fetch(t.url);
+        if (!res.ok) throw 0;
+        t.buffer = await audioCtx.decodeAudioData(await res.arrayBuffer());
+        document.getElementById(`st-${i}`).textContent = "Hazır (" + fmt(t.buffer.duration) + ")";
+      } catch {
+        document.getElementById(`st-${i}`).textContent = "Dosya seçin veya yolu kontrol edin";
+      }
+    }));
+    updateDur();
+  }
+
+  function updateDur() {
+    const loaded = tracks.filter(t => t.buffer).map(t => t.buffer.duration);
+    if (!loaded.length) { playBtn.textContent = "Kanal Seçin"; return; }
+    duration = Math.max(...loaded);
+    seekBar.max = duration;
+    playBtn.disabled = stopBtn.disabled = seekBar.disabled = false;
+    playBtn.textContent = isPlaying ? "Duraklat" : "Oynat";
+    timeDisplay.textContent = fmt(pauseOffset) + " / " + fmt(duration);
+  }
+
+  function updateGains() {
+    const anySolo = tracks.some(t => t.solo);
+    tracks.forEach(t => {
+      if (!t.gain) return;
+      const on = anySolo ? t.solo : !t.muted;
+      t.gain.gain.setTargetAtTime(on ? t.vol : 0, audioCtx.currentTime, 0.015);
+    });
+  }
+
+  function play() {
+    initCtx();
+    stopSources();
+    const now = audioCtx.currentTime;
+    startTime = now - pauseOffset;
+    tracks.forEach(t => {
+      if (!t.buffer || pauseOffset >= t.buffer.duration) return;
+      const src = audioCtx.createBufferSource();
+      src.buffer = t.buffer;
+      const g = audioCtx.createGain();
+      src.connect(g); g.connect(audioCtx.destination);
+      t.source = src; t.gain = g;
+      src.start(now, pauseOffset);
+    });
+    updateGains();
+    isPlaying = true;
+    playBtn.textContent = "Duraklat";
+    loop();
+  }
+
+  function pause() {
+    pauseOffset = audioCtx.currentTime - startTime;
+    stopSources();
+    isPlaying = false;
+    playBtn.textContent = "Oynat";
+    cancelAnimationFrame(raf);
+  }
+
+  function stop() {
+    stopSources();
+    isPlaying = false; pauseOffset = 0; seekBar.value = 0;
+    playBtn.textContent = "Oynat";
+    timeDisplay.textContent = "0:00 / " + fmt(duration);
+    cancelAnimationFrame(raf);
+  }
+
+  function stopSources() {
+    tracks.forEach(t => { if (t.source) { try { t.source.stop(); } catch {} t.source = null; } });
+  }
+
+  function loop() {
+    if (!isPlaying) return;
+    const cur = audioCtx.currentTime - startTime;
+    if (cur >= duration) { stop(); return; }
+    seekBar.value = cur;
+    timeDisplay.textContent = fmt(cur) + " / " + fmt(duration);
+    raf = requestAnimationFrame(loop);
+  }
+
+  function fmt(s) { const m = Math.floor(s / 60), sec = Math.floor(s % 60); return m + ":" + (sec < 10 ? "0" : "") + sec; }
+
+  playBtn.onclick = () => isPlaying ? pause() : play();
+  stopBtn.onclick = stop;
+  seekBar.oninput = (e) => { pauseOffset = +e.target.value; timeDisplay.textContent = fmt(pauseOffset) + " / " + fmt(duration); if (isPlaying) play(); };
+
+  loadAll();
+</script>
+</body>
+</html>
